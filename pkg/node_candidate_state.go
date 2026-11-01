@@ -11,7 +11,6 @@ func (n *Node) doCandidate() stateFunction {
 	// possible channel.
 
 	// following state, get curr term, increment
-
 	curr_term := n.GetCurrentTerm()
 	n.SetCurrentTerm(curr_term + 1)
 
@@ -19,12 +18,27 @@ func (n *Node) doCandidate() stateFunction {
 	n.setVotedFor(ownId)
 
 	timer := randomTimeout(n.Config.ElectionTimeout)
-	
-	request := RequestVoteRequest{
-		Term:         n.GetCurrentTerm(),
-		CandidateId:  n.Self.GetId(),
-		LastLogIndex: n.LastLogIndex(),
-		LastLogTerm:  n.LastLogTerm(),
+
+	// send request to each individual node
+	for peer, _ := range n.Peers {
+		if peer == ownId {
+			continue
+		}
+
+		request := RequestVoteRequest{
+			Term:         n.GetCurrentTerm(),
+			Candidate:    ownId,
+			LastLogIndex: n.LastLogIndex(),
+			LastLogTerm:  n.LastLogTerm(),
+		}
+		reply, err := n.sendRequestVote(peer, request)
+		if err != nil {
+			n.Out("Error sending request vote to peer %v: %v", peer, err)
+			continue
+		}
+		if reply.VoteGranted {
+			n.Out("Received vote from peer %v", peer)
+		}
 	}
 
 	select {
@@ -34,9 +48,10 @@ func (n *Node) doCandidate() stateFunction {
 
 	// handles the incoming append entries messages
 	case msg := <-n.appendEntries:
-		
-
-		
+		fallback, _ := n.handleAppendEntries(msg)
+		if fallback {
+			return n.doFollower
+		}
 
 	// evaluates the incoming vote requests
 	case msg := <-n.requestVote:
@@ -44,33 +59,7 @@ func (n *Node) doCandidate() stateFunction {
 		if fallback {
 			return n.doFollower
 		}
-		
-		
-
-
 	}
-	
-	return nil
-
-	
-
-
-
-	// election timeout, request vote, votes for itself
-	
-	n.appendEntries = make(chan AppendEntriesMsg, 100)
-	n.requestVote = make(chan RequestVoteMsg, 100)
-	
-
-
-	
-
-
-	
-
-
-	// leader
-
 
 	return nil
 }
@@ -80,7 +69,7 @@ func (n *Node) doCandidate() stateFunction {
 // successful election, false otherwise.
 func (n *Node) requestVotes(currTerm uint64) (fallback, electionResult bool) {
 	// TODO: Students should implement this method
-	return
+	return true, true
 }
 
 // handleRequestVote handles an incoming vote request. It returns true if the caller

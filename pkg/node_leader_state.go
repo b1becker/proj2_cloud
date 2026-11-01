@@ -30,7 +30,7 @@ func (n *Node) doLeader() stateFunction {
 // machine should be given the new log entries via processLogEntry.
 func (n *Node) sendHeartbeats() (fallback bool) {
 	// TODO: Students should implement this method
-	return true, true
+	return true
 }
 
 // processLogEntry applies a single log entry to the finite state machine. It is
