@@ -9,6 +9,69 @@ func (n *Node) doCandidate() stateFunction {
 	// Hint: perform any initial work, and then consider what a node in the
 	// candidate state should do when it receives an incoming message on every
 	// possible channel.
+
+	// following state, get curr term, increment
+
+	curr_term := n.GetCurrentTerm()
+	n.SetCurrentTerm(curr_term + 1)
+
+	ownId := n.Self.GetId()
+	n.setVotedFor(ownId)
+
+	timer := randomTimeout(n.Config.ElectionTimeout)
+	
+	request := RequestVoteRequest{
+		Term:         n.GetCurrentTerm(),
+		CandidateId:  n.Self.GetId(),
+		LastLogIndex: n.LastLogIndex(),
+		LastLogTerm:  n.LastLogTerm(),
+	}
+
+	select {
+	case <-timer:
+		n.Out("Election timeout, starting new election")
+		return n.doCandidate
+
+	// handles the incoming append entries messages
+	case msg := <-n.appendEntries:
+		
+
+		
+
+	// evaluates the incoming vote requests
+	case msg := <-n.requestVote:
+		fallback := n.handleRequestVote(msg)
+		if fallback {
+			return n.doFollower
+		}
+		
+		
+
+
+	}
+	
+	return nil
+
+	
+
+
+
+	// election timeout, request vote, votes for itself
+	
+	n.appendEntries = make(chan AppendEntriesMsg, 100)
+	n.requestVote = make(chan RequestVoteMsg, 100)
+	
+
+
+	
+
+
+	
+
+
+	// leader
+
+
 	return nil
 }
 
