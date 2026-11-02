@@ -14,13 +14,14 @@ func (n *Node) doCandidate() stateFunction {
 
 	// following state, get curr term, increment
 	curr_term := n.GetCurrentTerm()
-	n.SetCurrentTerm(curr_term + 1)
+	curr_term++
+	n.SetCurrentTerm(curr_term)
 
 	ownId := n.Self.GetId()
 	n.setVotedFor(ownId)
 
 	timer := randomTimeout(n.Config.ElectionTimeout)
-
+	
 	fallback, electionWon := n.requestVotes(curr_term)
 
 	if fallback {
@@ -73,10 +74,19 @@ func (n *Node) requestVotes(currTerm uint64) (fallback, electionResult bool) {
             continue
         }
 
+		var lastLogTerm uint64
+		lastLogIndex := n.LastLogIndex()
+		if lastLogIndex == 0 {
+			lastLogTerm = 0
+		} else {
+			lastLogTerm = n.GetLog(lastLogIndex).TermId
+		}
+
         request := RequestVoteRequest{
             Term:         currTerm,
             Candidate:    n.Self,
-            LastLogIndex: n.LastLogIndex(),
+            LastLogIndex: lastLogIndex,
+			LastLogTerm: lastLogTerm,
         }
 
         reply, err := peer.RequestVoteRPC(n, &request)
@@ -109,34 +119,40 @@ func (n *Node) handleRequestVote(msg RequestVoteMsg) (fallback bool) {
 	curr_term := n.GetCurrentTerm()
 
 
-
+	// old terms are rejected by default
 	if request_term < curr_term {
 		msg.reply <- RequestVoteReply{
-			Term:        curr_term,
+			Term: curr_term,
 			VoteGranted: false,
 		}
 		return false
 	}
 
-	if request_term > curr_term {
+	higherTerm := request_term > curr_term
+
+	if higherTerm{
 		n.SetCurrentTerm(request_term)
 		n.setVotedFor("")
-		return true
+		curr_term = request_term
 	}
 
+	// if voted for another canditate reject
 	votedFor := n.GetVotedFor()
 	if votedFor == "" || votedFor == request.Candidate.Id {
 		msg.reply <- RequestVoteReply{
 			Term: curr_term,
 			VoteGranted: false,
 		}
-		return false
-
+		return higherTerm
 	}
 
 	// this checks if a potential candidate's log is up to date
 	localLastLogIndex := n.LastLogIndex()
-	localLastLogTerm := n.GetLog(localLastLogIndex).TermId
+	localLastLogTerm := uint64(0)
+
+	if localLastLogIndex > 0 {
+        localLastLogTerm = n.GetLog(localLastLogIndex).TermId
+    }
 
 	logIsUpToDate := request.LastLogTerm > localLastLogTerm || (request.LastLogTerm == localLastLogTerm && request.LastLogIndex >= localLastLogIndex)
 
@@ -145,7 +161,7 @@ func (n *Node) handleRequestVote(msg RequestVoteMsg) (fallback bool) {
 			Term: curr_term,
 			VoteGranted: false,
 		}
-		return false
+		return higherTerm
 	}
 
 	// if passes all checks set the vote
@@ -156,5 +172,5 @@ func (n *Node) handleRequestVote(msg RequestVoteMsg) (fallback bool) {
 		VoteGranted: true,
 	}
 	
-	return false
+	return higherTerm
 }
