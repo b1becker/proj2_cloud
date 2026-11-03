@@ -12,3 +12,7 @@ docker run -it -v /Users/brian/Desktop/cs118/proj2_cloud:/raft-container/raft-ma
 cd autograder-source/raft
 
 cp -r /raft-container/raft-main/. submission/ && make test
+
+
+cd submission
+cp ../source/resources/studtest/test/ta_*.go test/

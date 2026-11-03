@@ -50,7 +50,7 @@ func (n *Node) doCandidate() stateFunction {
 			n.setVotedFor("")
 			return n.doFollower
 		}
-		if reply.Term == curr_term && reply.VoteGranted {
+		if reply.VoteGranted {
 			votes++
 			if votes >= majority {
 				n.Out("the current node has won the election")
@@ -76,6 +76,10 @@ func (n *Node) doCandidate() stateFunction {
 			return nil
 		}
 	
+	case msg := <-n.clientRequest:
+		msg.reply <- ClientReply{
+			Status: ClientStatus_NOT_LEADER,
+		}
 	}
 
 	

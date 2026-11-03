@@ -38,7 +38,13 @@ func (n *Node) doFollower() stateFunction {
 
 		case <-timeout:
 			n.Out("Election timeout")
-			return n.doCandidate()
+			return n.doCandidate
+
+		case msg := <-n.requestVote:
+			n.handleRequestVote(msg)
+			if n.GetVotedFor() == msg.request.Candidate.Id {
+				timeout = randomTimeout(n.Config.ElectionTimeout)
+			}
 		}
 	}
 }

@@ -21,13 +21,26 @@ func (n *Node) doLeader() stateFunction {
 	// possible channel.
 	n.nextIndex = make(map[string]uint64)
 	n.matchIndex = make(map[string]uint64)
+
 	
 	for _, peer := range n.getPeers() {
 		if peer.GetId() == n.Self.GetId() {
 			continue
 		}
-		n.nextIndex[peer.GetId()] = n.LastLogIndex() + 1
+		n.nextIndex[peer.GetId()] = n.LastLogIndex() + 1   // before the NOOP is appended
 		n.matchIndex[peer.GetId()] = 0
+	}
+	// so we were having the issue where the log hadn't been setup when becoming leader
+	n.StoreLog(&LogEntry{
+		Index:  n.LastLogIndex() + 1,
+		TermId: n.GetCurrentTerm(),
+		Type:   CommandType_NOOP,
+	})
+
+
+
+	if n.sendHeartbeats() {
+		return n.doFollower
 	}
 
 	heartbeat_timer := randomTimeout(n.Config.HeartbeatTimeout)
@@ -64,7 +77,7 @@ func (n *Node) doLeader() stateFunction {
 
 		case msg := <-n.clientRequest:
 			// msg.reply <- ClientReply{
-			// 	Status: ClientStatus_NOT_LEADER}
+				// Status: ClientStatus_NOT_LEADER}
 
 			cacheId := strconv.FormatUint(msg.request.ClientId, 10) + "-" +
         strconv.FormatUint(msg.request.SequenceNum, 10)
@@ -86,7 +99,6 @@ func (n *Node) doLeader() stateFunction {
 			n.requestsByCacheID[cacheId] = append(n.requestsByCacheID[cacheId], msg.reply)
 			n.requestsMutex.Unlock()
 
-			n.StoreLog(logEntry)
 			fallback := n.sendHeartbeats()
 			if fallback {
 				return n.doFollower
@@ -184,7 +196,7 @@ func (n *Node) sendHeartbeats() (fallback bool) {
 				}
 			}
 
-			majority := ((len(n.getPeers()) + 1) / 2) + 1
+			majority := ((len(n.getPeers())) / 2) + 1
 			if count >= majority {
 				n.CommitIndex.Store(i)
 				for n.LastApplied.Load() < n.CommitIndex.Load() {
