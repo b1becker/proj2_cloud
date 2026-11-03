@@ -5,7 +5,7 @@ import (
 	"math"
 	"time"
 )
-
+// one bug we ran into was not resetting the election timeout
 // doFollower implements the logic for a Raft node in the follower state.
 func (n *Node) doFollower() stateFunction {
 	n.Out("Transitioning to FollowerState")

@@ -21,22 +21,42 @@ func (n *Node) doCandidate() stateFunction {
 	n.setVotedFor(ownId)
 
 	timer := randomTimeout(n.Config.ElectionTimeout)
-	
-	fallback, electionWon := n.requestVotes(curr_term)
 
-	if fallback {
-		return n.doFollower
-	}
+	// CHANGED: requestVotes now returns a channel of replies instead of blocking
+	voteCh := n.requestVotes(curr_term)
 
-	if electionWon {
+	// NEW: the vote tally moved here since replies arrive inside the loop
+	votes := 1
+	majority := (len(n.getPeers()))/2 + 1
+	if votes >= majority {
 		n.Out("the current node has won the election")
 		return n.doLeader
 	}
+
+	// i learned that for loop is necessary to keep node in candidate state
+	// at the bottom of the loop i had .doleader so it would automatically put the candidate to a leader after failing checks
+	for {
 
 	select {
 	case <-timer:
 		n.Out("Election timeout, starting new election")
 		return n.doCandidate
+
+	// NEW: handles vote replies as they come in
+	case reply := <-voteCh:
+		// A peer with a higher term means we are no longer up to date
+		if reply.Term > n.GetCurrentTerm() {
+			n.SetCurrentTerm(reply.Term)
+			n.setVotedFor("")
+			return n.doFollower
+		}
+		if reply.Term == curr_term && reply.VoteGranted {
+			votes++
+			if votes >= majority {
+				n.Out("the current node has won the election")
+				return n.doLeader
+			}
+		}
 
 	// handles the incoming append entries messages
 	case msg := <-n.appendEntries:
@@ -53,9 +73,8 @@ func (n *Node) doCandidate() stateFunction {
 		}
 	}
 
-	
+}
 
-	return n.doCandidate
 }
 
 // requestVotes is called to request votes from all other nodes. It takes in a
@@ -63,51 +82,44 @@ func (n *Node) doCandidate() stateFunction {
 // successful election, false otherwise.
 
 // helper for doCandidate
-func (n *Node) requestVotes(currTerm uint64) (fallback, electionResult bool) {
+// CHANGED: sends each RPC in its own goroutine and returns the reply channel
+func (n *Node) requestVotes(currTerm uint64) chan *RequestVoteReply {
     peers := n.getPeers()
 
-    votes := 1 // We already voted for ourselves
+    // buffered so goroutines never block (or leak) if the candidate has moved on
+    voteCh := make(chan *RequestVoteReply, len(peers))
+
+    var lastLogTerm uint64
+    lastLogIndex := n.LastLogIndex()
+    if lastLogIndex == 0 {
+        lastLogTerm = 0
+    } else {
+        lastLogTerm = n.GetLog(lastLogIndex).TermId
+    }
 
     for _, peer := range peers {
-        
+
         if peer.Id == n.Self.Id {
             continue
         }
-
-		var lastLogTerm uint64
-		lastLogIndex := n.LastLogIndex()
-		if lastLogIndex == 0 {
-			lastLogTerm = 0
-		} else {
-			lastLogTerm = n.GetLog(lastLogIndex).TermId
-		}
 
         request := RequestVoteRequest{
             Term:         currTerm,
             Candidate:    n.Self,
             LastLogIndex: lastLogIndex,
-			LastLogTerm: lastLogTerm,
+            LastLogTerm:  lastLogTerm,
         }
 
-        reply, err := peer.RequestVoteRPC(n, &request)
-        if err != nil {
-            continue
-        }
-
-        // A peer with a higher term means we are no longer up to date
-        if reply.Term > currTerm {
-            n.SetCurrentTerm(reply.Term)
-            n.setVotedFor("")
-            return true, false
-        }
-
-        if reply.VoteGranted {
-            votes++
-        }
+        go func(p *RemoteNode, req RequestVoteRequest) {
+            reply, err := p.RequestVoteRPC(n, &req)
+            if err != nil {
+                return
+            }
+            voteCh <- reply
+        }(peer, request)
     }
 
-    majority := len(peers) / 2 + 1
-    return false, votes >= majority
+    return voteCh
 }
 
 // handleRequestVote handles an incoming vote request. It returns true if the caller
@@ -138,7 +150,7 @@ func (n *Node) handleRequestVote(msg RequestVoteMsg) (fallback bool) {
 
 	// if voted for another canditate reject
 	votedFor := n.GetVotedFor()
-	if votedFor == "" || votedFor == request.Candidate.Id {
+	if votedFor != "" && votedFor != request.Candidate.Id {
 		msg.reply <- RequestVoteReply{
 			Term: curr_term,
 			VoteGranted: false,

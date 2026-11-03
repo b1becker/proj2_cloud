@@ -13,10 +13,90 @@ func (n *Node) doLeader() stateFunction {
 	n.Out("Transitioning to LeaderState")
 	n.setState(LeaderState)
 
+	// peers := n.getPeers()
+	_ = n.getPeers()
 	// TODO: Students should implement this method
 	// Hint: perform any initial work, and then consider what a node in the
 	// leader state should do when it receives an incoming message on every
 	// possible channel.
+	n.nextIndex = make(map[string]uint64)
+	n.matchIndex = make(map[string]uint64)
+	
+	for _, peer := range n.getPeers() {
+		if peer.GetId() == n.Self.GetId() {
+			continue
+		}
+		n.nextIndex[peer.GetId()] = n.LastLogIndex() + 1
+		n.matchIndex[peer.GetId()] = 0
+	}
+
+	heartbeat_timer := randomTimeout(n.Config.HeartbeatTimeout)
+
+	for {
+		select {
+		case shutdown := <-n.gracefulExit:
+			if shutdown {
+				return nil
+			}
+
+		case <- heartbeat_timer:
+			fallback := n.sendHeartbeats()
+
+			if fallback {
+				return n.doFollower
+			}
+			heartbeat_timer = randomTimeout(n.Config.HeartbeatTimeout)
+
+
+		
+		case msg := <-n.appendEntries:
+			fallback, _ := n.handleAppendEntries(msg)
+			if fallback {
+				return n.doFollower
+			}
+
+		case msg := <-n.requestVote: 
+			fallback := n.handleRequestVote(msg)
+			if fallback {
+				return n.doFollower
+			}
+			
+
+		case msg := <-n.clientRequest:
+			// msg.reply <- ClientReply{
+			// 	Status: ClientStatus_NOT_LEADER}
+
+			cacheId := strconv.FormatUint(msg.request.ClientId, 10) + "-" +
+        strconv.FormatUint(msg.request.SequenceNum, 10)
+
+			
+			// append to leader's log
+			logEntry := &LogEntry{
+				Index: n.LastLogIndex() + 1,
+				TermId: n.GetCurrentTerm(),
+				Type: CommandType_STATE_MACHINE_COMMAND,
+				Command: msg.request.StateMachineCmd,
+				Data: msg.request.Data,
+				CacheId: cacheId,
+			}
+			n.StoreLog(logEntry)
+
+			// send reply to client, entering critical section
+			n.requestsMutex.Lock()
+			n.requestsByCacheID[cacheId] = append(n.requestsByCacheID[cacheId], msg.reply)
+			n.requestsMutex.Unlock()
+
+			n.StoreLog(logEntry)
+			fallback := n.sendHeartbeats()
+			if fallback {
+				return n.doFollower
+			}
+		
+		}
+		
+
+
+	}
 	return nil
 }
 
@@ -30,7 +110,96 @@ func (n *Node) doLeader() stateFunction {
 // machine should be given the new log entries via processLogEntry.
 func (n *Node) sendHeartbeats() (fallback bool) {
 	// TODO: Students should implement this method
-	return true
+	term := n.GetCurrentTerm()
+
+	for _, peer := range n.getPeers() {
+		if peer.GetId() == n.Self.GetId() {
+			continue
+		}
+
+		prevLogIndex := n.nextIndex[peer.GetId()] - 1
+
+		var prevLogTerm uint64
+
+		if prevLogIndex > 0 {
+			prevlog := n.GetLog(prevLogIndex)
+			if prevlog == nil {
+				panic("prevLogIndex is greater than last log index")
+			} else {
+				prevLogTerm = prevlog.TermId
+			}
+			
+		}
+		
+		entries := []*LogEntry{}
+
+		if n.LastLogIndex() >= n.nextIndex[peer.GetId()] {
+			for i := n.nextIndex[peer.GetId()]; i <= n.LastLogIndex(); i++ {
+				entries = append(entries, n.GetLog(i))
+			}
+		}
+
+		request := AppendEntriesRequest{
+			Term:         term,
+			Leader:     n.Self,
+			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  prevLogTerm,
+			Entries:      entries,
+			LeaderCommit: n.CommitIndex.Load(),
+		}
+
+		reply, err := peer.AppendEntriesRPC(n, &request)
+		if err != nil {
+			continue
+		}
+
+		if reply.Term > term {
+			n.SetCurrentTerm(reply.Term)
+			n.setVotedFor("")
+			return true
+		}
+
+		if reply.Success {
+			n.nextIndex[peer.GetId()] = n.LastLogIndex() + 1
+			n.matchIndex[peer.GetId()] = n.LastLogIndex()
+		} else if n.nextIndex[peer.GetId()] > 1 {
+			// NOTE THIS IS an extension and some guard against unsigned integer underflow
+			n.nextIndex[peer.GetId()]--
+		}
+		
+		old_commit_index := n.CommitIndex.Load()
+		for i := n.LastLogIndex(); i > old_commit_index; i-- {
+			count := 1 // count itself
+			if n.GetLog(i).TermId != term {
+				continue
+			}
+
+			for _, peer := range n.getPeers() {
+				if peer.GetId() == n.Self.GetId() {
+					continue
+				}
+
+				if n.matchIndex[peer.GetId()] >= i {
+					count++
+				}
+			}
+
+			majority := ((len(n.getPeers()) + 1) / 2) + 1
+			if count >= majority {
+				n.CommitIndex.Store(i)
+				for n.LastApplied.Load() < n.CommitIndex.Load() {
+					n.processLogEntry(n.LastApplied.Inc())
+				}
+				break
+			}
+		}
+		
+			
+			
+
+			
+	}
+	return false
 }
 
 // processLogEntry applies a single log entry to the finite state machine. It is
