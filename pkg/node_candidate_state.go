@@ -71,7 +71,14 @@ func (n *Node) doCandidate() stateFunction {
 		if fallback {
 			return n.doFollower
 		}
+	case shutdown := <-n.gracefulExit:
+		if shutdown {
+			return nil
+		}
+	
 	}
+
+	
 
 }
 
