@@ -9,41 +9,35 @@ import (
 )
 
 // doLeader implements the logic for a Raft node in the leader state.
+// doLeader implements the logic for a Raft node in the leader state.
 func (n *Node) doLeader() stateFunction {
 	n.Out("Transitioning to LeaderState")
 	n.setState(LeaderState)
 
-	// peers := n.getPeers()
-	_ = n.getPeers()
-	// TODO: Students should implement this method
-	// Hint: perform any initial work, and then consider what a node in the
-	// leader state should do when it receives an incoming message on every
-	// possible channel.
 	n.nextIndex = make(map[string]uint64)
 	n.matchIndex = make(map[string]uint64)
-
-	
 	for _, peer := range n.getPeers() {
 		if peer.GetId() == n.Self.GetId() {
 			continue
 		}
-		n.nextIndex[peer.GetId()] = n.LastLogIndex() + 1   // before the NOOP is appended
+		n.nextIndex[peer.GetId()] = n.LastLogIndex() + 1 // before the NOOP is appended
 		n.matchIndex[peer.GetId()] = 0
 	}
-	// so we were having the issue where the log hadn't been setup when becoming leader
+
+	// new leader appends a NOOP for its term
 	n.StoreLog(&LogEntry{
 		Index:  n.LastLogIndex() + 1,
 		TermId: n.GetCurrentTerm(),
 		Type:   CommandType_NOOP,
 	})
 
-
-
+	// initial heartbeat right after winning the election
 	if n.sendHeartbeats() {
+		n.failPendingRequests()
 		return n.doFollower
 	}
 
-	heartbeat_timer := randomTimeout(n.Config.HeartbeatTimeout)
+	heartbeatTimer := randomTimeout(n.Config.HeartbeatTimeout)
 
 	for {
 		select {
@@ -52,64 +46,78 @@ func (n *Node) doLeader() stateFunction {
 				return nil
 			}
 
-		case <- heartbeat_timer:
-			fallback := n.sendHeartbeats()
-
-			if fallback {
+		case <-heartbeatTimer:
+			if n.sendHeartbeats() {
+				n.failPendingRequests()
 				return n.doFollower
 			}
-			heartbeat_timer = randomTimeout(n.Config.HeartbeatTimeout)
+			heartbeatTimer = randomTimeout(n.Config.HeartbeatTimeout)
 
-
-		
 		case msg := <-n.appendEntries:
-			fallback, _ := n.handleAppendEntries(msg)
+			// handleAppendEntries returns (resetTimeout, fallback)
+			_, fallback := n.handleAppendEntries(msg)
 			if fallback {
+				n.failPendingRequests()
 				return n.doFollower
 			}
 
-		case msg := <-n.requestVote: 
-			fallback := n.handleRequestVote(msg)
-			if fallback {
+		case msg := <-n.requestVote:
+			if n.handleRequestVote(msg) {
+				n.failPendingRequests()
 				return n.doFollower
 			}
-			
 
 		case msg := <-n.clientRequest:
-			// msg.reply <- ClientReply{
-				// Status: ClientStatus_NOT_LEADER}
+			var entry *LogEntry
+			var key string
+			idx := n.LastLogIndex() + 1
 
-			cacheId := strconv.FormatUint(msg.request.ClientId, 10) + "-" +
-        strconv.FormatUint(msg.request.SequenceNum, 10)
-
-			
-			// append to leader's log
-			logEntry := &LogEntry{
-				Index: n.LastLogIndex() + 1,
-				TermId: n.GetCurrentTerm(),
-				Type: CommandType_STATE_MACHINE_COMMAND,
-				Command: msg.request.StateMachineCmd,
-				Data: msg.request.Data,
-				CacheId: cacheId,
+			if msg.request == nil || (msg.request.ClientId == 0 && msg.request.SequenceNum == 0) {
+				// client registration
+				key = "register-" + strconv.FormatUint(idx, 10)
+				entry = &LogEntry{
+					Index:   idx,
+					TermId:  n.GetCurrentTerm(),
+					Type:    CommandType_CLIENT_REGISTRATION,
+					CacheId: key,
+				}
+			} else {
+				// state machine command
+				key = CreateCacheID(msg.request.ClientId, msg.request.SequenceNum)
+				entry = &LogEntry{
+					Index:   idx,
+					TermId:  n.GetCurrentTerm(),
+					Type:    CommandType_STATE_MACHINE_COMMAND,
+					Command: msg.request.StateMachineCmd,
+					Data:    msg.request.Data,
+					CacheId: key,
+				}
 			}
-			n.StoreLog(logEntry)
 
-			// send reply to client, entering critical section
+			// register the reply channel BEFORE storing the entry
 			n.requestsMutex.Lock()
-			n.requestsByCacheID[cacheId] = append(n.requestsByCacheID[cacheId], msg.reply)
+			n.requestsByCacheID[key] = append(n.requestsByCacheID[key], msg.reply)
 			n.requestsMutex.Unlock()
 
-			fallback := n.sendHeartbeats()
-			if fallback {
+			n.StoreLog(entry)
+			if n.sendHeartbeats() {
+				n.failPendingRequests()
 				return n.doFollower
 			}
-		
 		}
-		
-
-
 	}
-	return nil
+}
+
+// failPendingRequests answers every waiting client with NOT_LEADER when we lose leadership.
+func (n *Node) failPendingRequests() {
+	n.requestsMutex.Lock()
+	defer n.requestsMutex.Unlock()
+	for id, chans := range n.requestsByCacheID {
+		for _, ch := range chans {
+			ch <- ClientReply{Status: ClientStatus_NOT_LEADER}
+		}
+		delete(n.requestsByCacheID, id)
+	}
 }
 
 // sendHeartbeats is used by the leader to send out heartbeats to each of
@@ -121,95 +129,86 @@ func (n *Node) doLeader() stateFunction {
 // up to that index. Once committed to that index, the replicated state
 // machine should be given the new log entries via processLogEntry.
 func (n *Node) sendHeartbeats() (fallback bool) {
-	// TODO: Students should implement this method
 	term := n.GetCurrentTerm()
+	lastIndex := n.LastLogIndex()
 
 	for _, peer := range n.getPeers() {
-		if peer.GetId() == n.Self.GetId() {
+		id := peer.GetId()
+		if id == n.Self.GetId() {
 			continue
 		}
 
-		prevLogIndex := n.nextIndex[peer.GetId()] - 1
-
-		var prevLogTerm uint64
-
-		if prevLogIndex > 0 {
-			prevlog := n.GetLog(prevLogIndex)
-			if prevlog == nil {
-				panic("prevLogIndex is greater than last log index")
-			} else {
-				prevLogTerm = prevlog.TermId
+		for {
+			// keep nextIndex inside the valid range
+			if n.nextIndex[id] == 0 || n.nextIndex[id] > lastIndex+1 {
+				n.nextIndex[id] = lastIndex + 1
 			}
-			
-		}
-		
-		entries := []*LogEntry{}
+			next := n.nextIndex[id]
+			prevLogIndex := next - 1
 
-		if n.LastLogIndex() >= n.nextIndex[peer.GetId()] {
-			for i := n.nextIndex[peer.GetId()]; i <= n.LastLogIndex(); i++ {
+			var prevLogTerm uint64
+			if prevLogIndex > 0 {
+				prev := n.GetLog(prevLogIndex)
+				if prev == nil {
+					break
+				}
+				prevLogTerm = prev.TermId
+			}
+
+			entries := []*LogEntry{}
+			for i := next; i <= lastIndex; i++ {
 				entries = append(entries, n.GetLog(i))
 			}
-		}
 
-		request := AppendEntriesRequest{
-			Term:         term,
-			Leader:     n.Self,
-			PrevLogIndex: prevLogIndex,
-			PrevLogTerm:  prevLogTerm,
-			Entries:      entries,
-			LeaderCommit: n.CommitIndex.Load(),
-		}
-
-		reply, err := peer.AppendEntriesRPC(n, &request)
-		if err != nil {
-			continue
-		}
-
-		if reply.Term > term {
-			n.SetCurrentTerm(reply.Term)
-			n.setVotedFor("")
-			return true
-		}
-
-		if reply.Success {
-			n.nextIndex[peer.GetId()] = n.LastLogIndex() + 1
-			n.matchIndex[peer.GetId()] = n.LastLogIndex()
-		} else if n.nextIndex[peer.GetId()] > 1 {
-			// NOTE THIS IS an extension and some guard against unsigned integer underflow
-			n.nextIndex[peer.GetId()]--
-		}
-		
-		old_commit_index := n.CommitIndex.Load()
-		for i := n.LastLogIndex(); i > old_commit_index; i-- {
-			count := 1 // count itself
-			if n.GetLog(i).TermId != term {
-				continue
+			request := AppendEntriesRequest{
+				Term:         term,
+				Leader:       n.Self,
+				PrevLogIndex: prevLogIndex,
+				PrevLogTerm:  prevLogTerm,
+				Entries:      entries,
+				LeaderCommit: n.CommitIndex.Load(),
 			}
 
-			for _, peer := range n.getPeers() {
-				if peer.GetId() == n.Self.GetId() {
-					continue
-				}
-
-				if n.matchIndex[peer.GetId()] >= i {
-					count++
-				}
+			reply, err := peer.AppendEntriesRPC(n, &request)
+			if err != nil {
+				break // unreachable: try again next heartbeat
 			}
-
-			majority := ((len(n.getPeers())) / 2) + 1
-			if count >= majority {
-				n.CommitIndex.Store(i)
-				for n.LastApplied.Load() < n.CommitIndex.Load() {
-					n.processLogEntry(n.LastApplied.Inc())
-				}
+			if reply.Term > term {
+				n.SetCurrentTerm(reply.Term)
+				n.setVotedFor("")
+				return true
+			}
+			if reply.Success {
+				n.matchIndex[id] = prevLogIndex + uint64(len(entries))
+				n.nextIndex[id] = n.matchIndex[id] + 1
 				break
 			}
+			if next <= 1 {
+				break
+			}
+			n.nextIndex[id] = next - 1 // log mismatch: back up and retry right away
 		}
-		
-			
-			
+	}
 
-			
+	// commit once, after all peers have been handled
+	majority := len(n.getPeers())/2 + 1
+	for i := lastIndex; i > n.CommitIndex.Load(); i-- {
+		if n.GetLog(i).TermId != term {
+			continue
+		}
+		count := 1 // the leader itself
+		for _, m := range n.matchIndex {
+			if m >= i {
+				count++
+			}
+		}
+		if count >= majority {
+			n.CommitIndex.Store(i)
+			for n.LastApplied.Load() < i {
+				n.processLogEntry(n.LastApplied.Inc())
+			}
+			break
+		}
 	}
 	return false
 }

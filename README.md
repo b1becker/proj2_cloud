@@ -16,3 +16,5 @@ cp -r /raft-container/raft-main/. submission/ && make test
 
 cd submission
 cp ../source/resources/studtest/test/ta_*.go test/
+
+go test ./test -run 'TestMy311' -v -count=1 -timeout 300s 2>&1 | tee my311.log
